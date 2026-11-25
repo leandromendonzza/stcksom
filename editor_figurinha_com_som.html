@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#111827">
+<title>Editor de Figurinha com Som</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1020;--panel:#151d31;--muted:#9aa8c1;--accent:#8b5cf6;--line:#29344d}
+*{box-sizing:border-box}body{margin:0;background:linear-gradient(160deg,#111a30,#080c17);color:#f4f6fb;font:15px system-ui,-apple-system,Segoe UI,sans-serif}
+main{max-width:760px;margin:auto;padding:22px 16px 42px}.top{margin:8px 0 20px}.top h1{font-size:25px;margin:0 0 6px}.top p{color:var(--muted);margin:0}
+.card{background:rgba(21,29,49,.96);border:1px solid var(--line);border-radius:18px;padding:16px;margin:14px 0;box-shadow:0 12px 30px #0003}
+label{display:block;font-weight:650;margin:12px 0 7px}input[type=file],input[type=number],input[type=range],button{width:100%}
+input[type=file],input[type=number]{background:#0c1425;border:1px solid var(--line);border-radius:11px;padding:12px;color:#fff}
+input[type=range]{accent-color:var(--accent)}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.preview{width:min(100%,360px);aspect-ratio:1;margin:14px auto;background:#05070c;border:1px solid #39445c;border-radius:14px;overflow:hidden;display:grid;place-items:center}
+video{width:100%;height:100%;object-fit:cover}.hint{color:var(--muted);font-size:13px;line-height:1.45}
+button{border:0;border-radius:13px;padding:14px 16px;font-weight:750;font-size:16px;background:var(--accent);color:white;margin-top:12px}
+button:disabled{opacity:.45}#status{white-space:pre-wrap;color:#d7dff0;font-size:13px;line-height:1.5;margin-top:12px}
+a{color:#c4b5fd}.pill{display:inline-block;background:#302454;color:#ddd2ff;padding:4px 9px;border-radius:99px;font-size:12px}
+@media(max-width:520px){.grid{grid-template-columns:1fr 1fr}.top h1{font-size:22px}}
+</style>
+</head>
+<body>
+<main>
+  <header class="top">
+    <span class="pill">PROCESSAMENTO NO NAVEGADOR</span>
+    <h1>🎬 Editor de figurinha com som</h1>
+    <p>Escolha um vídeo, corte até 5 segundos e exporte a animação e o áudio juntos em um único pacote.</p>
+  </header>
+
+  <section class="card">
+    <label for="file">1. Escolha o vídeo</label>
+    <input id="file" type="file" accept="video/*">
+    <div class="preview"><video id="preview" playsinline muted loop></video></div>
+    <p class="hint">A prévia é quadrada. O enquadramento final usa corte central com zoom ajustável.</p>
+  </section>
+
+  <section class="card">
+    <div class="grid">
+      <div><label for="start">Início (segundos)</label><input id="start" type="number" min="0" step="0.1" value="0"></div>
+      <div><label for="duration">Duração (máx. 5 s)</label><input id="duration" type="number" min="0.5" max="5" step="0.1" value="5"></div>
+    </div>
+    <label for="zoom">Zoom do enquadramento <span id="zoomv">1,0×</span></label>
+    <input id="zoom" type="range" min="1" max="3" value="1" step=".05">
+    <div class="grid">
+      <div><label for="x">Posição horizontal</label><input id="x" type="range" min="0" max="100" value="50"></div>
+      <div><label for="y">Posição vertical</label><input id="y" type="range" min="0" max="100" value="50"></div>
+    </div>
+    <p class="hint">Ajuste o zoom e a posição para preencher o quadrado sem bordas. A saída visual será WebP animado 512 × 512; o áudio será Opus.</p>
+  </section>
+
+  <section class="card">
+    <button id="convert" disabled>Converter e baixar pacote</button>
+    <div id="status">Selecione um vídeo para começar.</div>
+    <p class="hint">O pacote ZIP contém <b>sticker.webp</b>, <b>audio.opus</b> e <b>manifest.json</b>, reunidos para manter os dois componentes associados.</p>
+  </section>
+  <p class="hint">Nota técnica: WebP não comporta trilha sonora. Por isso, o pacote reúne a animação WebP e o áudio Opus separadamente, com um manifesto indicando a estrutura pretendida de figurinha sonora (audioStickerMessage / stickerMessage.audioMessage). Isso não é, por si só, uma mensagem WhatsApp pronta nem garante compatibilidade com o aplicativo.</p>
+</main>
+<script type="module">
+const $=id=>document.getElementById(id);
+const file=$('file'),video=$('preview'),btn=$('convert'),status=$('status');
+let selected=null,ffmpeg=null,JSZip=null;
+const say=t=>status.textContent=t;
+file.addEventListener('change',()=>{
+ selected=file.files?.[0]||null;
+ if(!selected)return;
+ video.src=URL.createObjectURL(selected); video.load(); btn.disabled=false;
+ video.onloadedmetadata=()=>{$('start').max=Math.max(0,video.duration-.5);$('duration').value=Math.min(5,video.duration).toFixed(1);say(`Vídeo carregado • ${video.duration.toFixed(2)} segundos`);};
+});
+$('zoom').addEventListener('input',()=>{$('zoomv').textContent=Number($('zoom').value).toFixed(2).replace('.',',')+'×';updatePreview();});
+['x','y'].forEach(id=>$(id).addEventListener('input',updatePreview));
+function updatePreview(){
+ const z=Number($('zoom').value),x=Number($('x').value),y=Number($('y').value);
+ video.style.objectFit='cover';video.style.transformOrigin=`${x}% ${y}%`;video.style.transform=`scale(${z})`;
+}
+btn.addEventListener('click',async()=>{
+ if(!selected)return;
+ btn.disabled=true;
+ try{
+  say('Carregando o conversor FFmpeg… (na primeira vez pode demorar)');
+  const [{FFmpeg},{toBlobURL},zipMod]=await Promise.all([
+   import('https://esm.sh/@ffmpeg/ffmpeg@0.12.10'),
+   import('https://esm.sh/@ffmpeg/util@0.12.1'),
+   import('https://esm.sh/jszip@3.10.1')
+  ]);
+  JSZip=zipMod.default;
+  if(!ffmpeg){
+   ffmpeg=new FFmpeg();
+   ffmpeg.on('log',({message})=>{if(message) say('Convertendo…\n'+message.slice(-500));});
+   const base='https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+   await ffmpeg.load({coreURL:await toBlobURL(base+'/ffmpeg-core.js','text/javascript'),wasmURL:await toBlobURL(base+'/ffmpeg-core.wasm','application/wasm')});
+  }
+  const start=Math.max(0,Number($('start').value)||0);
+  const duration=Math.min(5,Math.max(.5,Number($('duration').value)||5));
+  const zoom=Number($('zoom').value),xp=Number($('x').value)/100,yp=Number($('y').value)/100;
+  const ext=(selected.name.split('.').pop()||'mp4').replace(/[^a-z0-9]/gi,'').toLowerCase();
+  const input='input.'+ext;
+  await ffmpeg.writeFile(input,new Uint8Array(await selected.arrayBuffer()));
+  // Crop to square, with user-controlled scale and focal point; then fit 512x512.
+  const vf=`scale='if(gte(iw,ih),-2,512*${zoom})':'if(gte(iw,ih),512*${zoom},-2)',crop=512:512:(in_w-512)*${xp}:(in_h-512)*${yp},fps=15,scale=512:512:flags=lanczos`;
+  say('Gerando WebP animado e áudio Opus…');
+  await ffmpeg.exec(['-ss',String(start),'-t',String(duration),'-i',input,'-an','-vf',vf,'-loop','0','-c:v','libwebp','-quality','70','-compression_level','6','-preset','picture','sticker.webp']);
+  await ffmpeg.exec(['-ss',String(start),'-t',String(duration),'-i',input,'-vn','-c:a','libopus','-b:a','64k','-vbr','on','-compression_level','10','-frame_duration','20','-avoid_negative_ts','make_zero','audio.opus']);
+  const webp=await ffmpeg.readFile('sticker.webp');
+  let opus;
+  try{opus=await ffmpeg.readFile('audio.opus');}catch{throw new Error('Não foi possível extrair áudio. Verifique se o vídeo possui uma faixa de áudio.');}
+  const zip=new JSZip();
+  zip.file('sticker.webp',webp);
+  zip.file('audio.opus',opus);
+  zip.file('manifest.json',JSON.stringify({
+   format:'experimental-audio-sticker-bundle',
+   intendedMessage:'audioStickerMessage',
+   outerFieldNumber:134,
+   stickerMessageAudioFieldNumber:26,
+   visual:{file:'sticker.webp',format:'animated-webp',width:512,height:512,durationSeconds:duration},
+   audio:{file:'audio.opus',codec:'Opus',durationSeconds:duration},
+   note:'Bundle de mídia e metadados; não é uma mensagem WhatsApp serializada nem garante compatibilidade.'
+  },null,2));
+  say('Compactando os arquivos…');
+  const blob=await zip.generateAsync({type:'blob',compression:'DEFLATE',compressionOptions:{level:5}});
+  const url=URL.createObjectURL(blob),a=document.createElement('a');
+  a.href=url;a.download='figurinha-com-som.zip';a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),30000);
+  say(`Concluído! Pacote gerado.\nWebP: ${(webp.length/1024).toFixed(0)} KB\nOpus: ${(opus.length/1024).toFixed(0)} KB\nBaixe figurinha-com-som.zip e extraia os três arquivos.`);
+ }catch(e){console.error(e);say('Não foi possível converter.\n'+(e?.message||String(e))+'\nTente um vídeo MP4 menor ou outro navegador.');}
+ finally{btn.disabled=false;}
+});
+</script>
+</body>
+</html>
